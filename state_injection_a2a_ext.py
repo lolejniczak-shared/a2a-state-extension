@@ -14,11 +14,17 @@ from a2a.types import SendMessageRequest
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 import sys
+from google.protobuf.json_format import MessageToDict
+from a2a.client.service_parameters import (
+    ServiceParametersFactory,
+    with_a2a_extensions,
+)
+from a2a.client.client import ClientCallContext
 logger = logging.getLogger("a2a.extension.state_injection")
 
 class StateInjectionExtension:
         def __init__(self, state_schema: str | dict | None = None):
-            self.CORE_PATH = 'github.com/a2aproject/a2a-samples/extensions/state_injection/v1'
+            self.CORE_PATH = 'github.com/lolejniczak-shared/a2a-samples/extensions/state_injection/v1'
             self.URI = f'https://{self.CORE_PATH}'
             self.STATE_FIELD = f'{self.CORE_PATH}/state'
 
@@ -59,38 +65,13 @@ class StateInjectionExtension:
 
         ## 2. we need some helper that will check if extension is acrivated by A2A Client 
         def is_requested(self, context: RequestContext) -> bool:
-            """Possibly activate this extension, depending on the request context.
-
-            The extension is considered active if the caller indicated it in an
-            X-A2A-Extensions header.
-            """
-            print("Requested extensions")
-            print(context)
-            print(context.requested_extensions)
             requested = self.URI in context.requested_extensions
             if requested:
                 print(f"Extension {self.URI} requested for request {getattr(context, 'request_id', 'N/A')}")
             else:
-                print(f"there is no {self.URI} on the list")
+                print(f"There is no {self.URI} on the list")
             return requested
 
-        
-        ## 2. we need some helper that will check if extension is acrivated by A2A Client 
-        def is_activated(self, context: RequestContext) -> bool:
-            """Possibly activate this extension, depending on the request context.
-
-            The extension is considered active if the caller indicated it in an
-            X-A2A-Extensions header.
-            """
-            print("Activated extensions")
-            print(context)
-            print(context.activated_extensions)
-            activated = self.URI in context.activated_extensions
-            if activated:
-                print(f"Extension {self.URI} is actived for request {getattr(context, 'request_id', 'N/A')}")
-            else:
-                print(f"there is no {self.URI} on the list")
-            return activated
 
         
         ## 3. the core of this extension is function that adds state object to Message or Artifact metadata
@@ -110,12 +91,12 @@ class StateInjectionExtension:
                 return True
                 
             try:
-                state_data = o.metadata.get(self.STATE_FIELD)
+                raw_state = o.metadata[self.STATE_FIELD]
+                state_data = MessageToDict(raw_state)
                 jsonschema.validate(instance=state_data, schema=self.state_schema)
                 return True
             except jsonschema.ValidationError as e:
-                # L7 Move: Log exactly WHY it failed (which field, what constraint)
-                logger.error(f"Schema validation failed for {URI}: {e.message} at {list(e.path)}")
+                logger.error(f"Schema validation failed for {self.URI}: {e.message} at {list(e.path)}")
                 return False
             except Exception as e:
                 logger.exception(f"Unexpected error during schema validation: {e}")
@@ -154,15 +135,15 @@ class StateInjectionClientInterceptor(ClientCallInterceptor):
     
         logger.info(f"Interceptor activating extension via context: {uri}")
 
-        # 1. Properly activate the extension using the SDK context
-        if args.context:
-            if uri not in args.context.requested_extensions:
-                # This is the canonical way to activate an extension in the client
-                args.context.requested_extensions.append(uri)
-                logger.debug(f"Added {uri} to context.requested_extensions")
+        ## Adding service parameters
+        extensions = [uri]
+        service_params = ServiceParametersFactory.create(
+            [with_a2a_extensions(extensions)]
+        )
+        ctx = ClientCallContext(service_parameters=service_params) 
+        args.context = ctx
 
-        # 2. Handle State Injection into the Request Object
-        # Check if input is the request object directly or a dict containing it
+
         request = None
         if isinstance(args.input, dict):
             request = args.input.get('request')
@@ -173,15 +154,15 @@ class StateInjectionClientInterceptor(ClientCallInterceptor):
             msg = request.message
             if msg.metadata is None:
                 msg.metadata = {}
-            
+            ## Adding metadata 
             msg.metadata[field] = self.state_data
             logger.debug(f"Injected state into message metadata: {field}")
         else:
             logger.warning("Interceptor could not find message in args.input to inject state.")
 
         # Return the modified input and early_return per 1.0-dev dataclass
-        return args.input, args.early_return
+        return args.input, args.context
 
     async def after(self, args: AfterArgs) -> Tuple[Any, bool]:
         """Satisfy abstract method."""
-        return args.result, args.early_return
+        return args.result, args.context

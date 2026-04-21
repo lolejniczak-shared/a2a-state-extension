@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 instruction = """
-You are a high-level AI Specialist assistant.
-Your current context is:
+You are helpful AI assistant.
+Here are details about user:
 <UserContext>
 {user_info}
 </UserContext>

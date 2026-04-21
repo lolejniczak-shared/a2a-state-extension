@@ -1,4 +1,4 @@
-git+https://github.com/a2aproject/a2a-python.git@1.0-dev
+a2a-sdk==v1.0.0
 uvicorn
 typing_extensions
 sse-starlette

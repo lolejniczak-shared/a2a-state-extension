@@ -5,6 +5,9 @@ from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events.event_queue import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.types import Part, TaskState, Message, Artifact
+from uuid import uuid4
+from a2a.types import Message, Part, Role, Task, TaskStatus
+from a2a.helpers import new_task
 
 from google.adk.runners import Runner
 from google.adk.artifacts import InMemoryArtifactService
@@ -13,6 +16,7 @@ from google.adk.memory import InMemoryMemoryService
 from google.genai import types
 import sys
 import json
+from a2a.helpers.proto_helpers import new_task_from_user_message
 
 # Import your extension class for type hinting
 from state_injection_a2a_ext import StateInjectionExtension
@@ -63,32 +67,32 @@ class ADKA2AExecutorWithRunner(AgentExecutor):
         # 2. State Extraction (Hydration)
         injected_state = {}
 
-        print("Is extension requested: ")
-        print(self.state_ext.is_requested(context))
+        logger.info("Checking if client requested state injection extension")
         if self.state_ext.is_requested(context):
-            print(f"state extension is requested")
+            logger.info(f"Checking if message includes state")
             if self.state_ext.has_state(context.message):
-                print(f"message includes state")
-                if self.state_ext.is_valid(context.message):
-                    print(f"provided state passed schema validation")
-                    print(context.message)
-                    injected_state = self.state_ext.get_state(context.message)
-                    print(injected_state)
-                    print(f"Hydrating session {context.context_id} with metadata state.")
-                else:
-                    logger.error("Metadata state failed schema validation.")
+                    logger.info(f"Checking if state JSON has valid schema")
+                    if self.state_ext.is_valid_schema(context.message):
+                        injected_state = self.state_ext.get_state(context.message)
+                    else:
+                        logger.error("Metadata state failed schema validation.")
 
-        ##https://github.com/a2aproject/a2a-python/blob/1.0-dev/src/a2a/server/agent_execution/context.py
-        context.add_activated_extension(self.state_ext.URI)
-        injected_state = self.state_ext.get_state(context.message)
 
         print("Injected state:")
         print(injected_state)
         # 3. Task Lifecycle Management
+
+        task = new_task_from_user_message(context.message)
+        await event_queue.enqueue_event(task)
+
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-        if not context.current_task:
-            await updater.submit()
-        await updater.start_work()
+        working_message = updater.new_agent_message(
+            parts=[Part(text='Processing your question...')]
+        )
+        await updater.start_work(message=working_message)
+        print(f"Current task: {context.current_task}")
+
+
 
         # 4. Prepare ADK Input
         query = context.get_user_input()
@@ -101,7 +105,6 @@ class ADKA2AExecutorWithRunner(AgentExecutor):
                 user_id=user_id,
                 session_id=context.context_id
             )
-
             
             if not session:
                 logger.info(f"Creating fresh session for {user_id}")
@@ -152,23 +155,76 @@ class ADKA2AExecutorWithRunner(AgentExecutor):
                     if updated_session: ##and self.state_ext.is_activated(context):
                         resp_metadata[self.state_ext.STATE_FIELD] = updated_session.state
                     
+
                     await updater.add_artifact(
                         [Part(text=response_text)],
                         name='result',
-                        metadata=resp_metadata
-                    )
+                        metadata=resp_metadata,
+                        extensions = [self.state_ext.URI],
+                        last_chunk = True
+                    )   ##extension usage is not communicated via response headers, but rather individually on message and artifact (handled by agent executor)
                     await updater.complete()
                     return
 
+                    ##await event_queue.enqueue_event(
+                    ##    TaskArtifactUpdateEvent(
+                    ##        task_id=context.task_id,
+                    ##        context_id=context.context_id,
+                    ##        artifact=raw_artifact
+                    ##    )
+                    ##)
+
+                    ##await event_queue.enqueue_event(
+                    ##    TaskStatusUpdateEvent(
+                    ##        task_id=context.task_id,
+                    ##        context_id=context.context_id,
+                    ##        status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+                    ##    )
+                    ##)
+                    ##return
+
             # Fallback if no response generated
+            msg = Message(
+                role=Role.ROLE_AGENT, 
+                message_id=str(uuid4()), 
+                parts=[Part(text="Agent failed to produce a final response.")]
+            )
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
-                message="Agent failed to produce a final response."
+                message=msg
             )
+
+            #3await event_queue.enqueue_event(
+            ##    TaskStatusUpdateEvent(
+            ##        task_id=context.task_id,
+            ##       context_id=context.context_id,
+            ##        status=TaskStatus(
+            ##            state=TaskState.TASK_STATE_FAILED,
+            ##            message=Message(role=Role.ROLE_AGENT,
+            ##            parts=[Part(text="No response produced.")])
+            ##3        ),
+            ##    )
+            ##)
 
         except Exception as e:
             logger.exception(f"Critical error in ADK Execution: {e}")
+            msg = Message(
+                role=Role.ROLE_AGENT, 
+                message_id=str(uuid4()), 
+                parts=[Part(text=f"Critical error in ADK Execution: {e}")]
+            )
+            
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
-                message=f"Internal Server Error: {str(e)}"
+                message=msg
             )
+            ##await event_queue.enqueue_event(
+            ##    TaskStatusUpdateEvent(
+            ##        task_id=context.task_id,
+            ##        context_id=context.context_id,
+            ##        status=TaskStatus(
+            ##            state=TaskState.TASK_STATE_FAILED,
+            ##            message=Message(role=Role.ROLE_AGENT, parts=[Part(text=f"Error: {e}")])
+            ##        ),
+            ##    )
+            ##)

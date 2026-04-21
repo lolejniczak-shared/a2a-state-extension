@@ -2,12 +2,17 @@ import httpx
 import asyncio
 import logging
 from uuid import uuid4
+from a2a.client.client import ClientCallContext
 from state_injection_a2a_ext import StateInjectionExtension, StateInjectionClientInterceptor
 from a2a.client.client_factory import ClientFactory, ClientConfig
-from a2a.types import SendMessageRequest, Message, Role
+from a2a.types import SendMessageRequest, Message, Role, Task, StreamResponse
 import sys
 from a2a.types import Message, Part, Role
 from typing import Any
+from a2a.client.service_parameters import (
+    ServiceParametersFactory,
+    with_a2a_extensions,
+)
 
 logging.basicConfig(level=logging.DEBUG)
 from a2a.client.client import ClientCallContext
@@ -42,6 +47,14 @@ async def run_client():
         ext = StateInjectionExtension() 
         state_interceptor = StateInjectionClientInterceptor(ext, user_state)
         debug_interceptor = DebugClientInterceptor()
+
+        extensions = [ext.URI]
+
+        service_params = ServiceParametersFactory.create(
+            [with_a2a_extensions(extensions)]
+        )
+        context = ClientCallContext(service_parameters=service_params)
+        print(context)
          
         # 3. Create Client
         client = await ClientFactory(
@@ -57,9 +70,18 @@ async def run_client():
             message_id=str(uuid4()), 
             parts=[Part(text="Who am I and what is my email?")]
         )
+
+        msg.metadata[ext.STATE_FIELD] = user_state
         
-        async for event in client.send_message(request=SendMessageRequest(message=msg)):
-            print(f"Agent says: {event}")
+        events = [
+            event async for event in client.send_message(request=SendMessageRequest(message=msg)) ##, context=context)
+        ]
+        response = events[0]
+
+        print(response)
+
+        print(response.task.artifacts[0].extensions)
+        print(response.task.artifacts[0].parts[0].text)
 
 if __name__ == "__main__":
     asyncio.run(run_client())
